@@ -25,6 +25,9 @@ from nanochat.optim import MuonAdamW, DistMuonAdamW
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
 
+# KDA (Kimi Delta Attention) from flash-linear-attention
+from fla.layers.kda import KimiDeltaAttention
+
 @dataclass
 class GPTConfig:
     sequence_len: int = 2048
@@ -37,6 +40,10 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Hybrid architecture: KDA vs Attention layer pattern
+    # Pattern string tiled across layers. Characters: K=KDA, A=Attention
+    # Examples: "KKKA"=3 KDA + 1 Attention (3:1 ratio), "KA"=alternating, "A"=all attention
+    layer_pattern: str = "KKKA"  # Default: 3:1 KDA:Attention ratio
 
 
 def norm(x):
@@ -132,13 +139,39 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config, layer_idx, use_kda=False):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.use_kda = use_kda
+        self.layer_idx = layer_idx
+        
+        if use_kda:
+            # Use KDA layer
+            self.attn = KimiDeltaAttention(
+                hidden_size=config.n_embd,
+                head_dim=config.n_embd // config.n_head,
+                num_heads=config.n_head,
+                num_v_heads=config.n_kv_head,
+                mode="chunk",  # Use chunk mode for training
+                use_short_conv=True,
+                conv_size=4,
+                layer_idx=layer_idx,
+            )
+        else:
+            # Use standard Flash Attention
+            self.attn = CausalSelfAttention(config, layer_idx)
+        
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+        if self.use_kda:
+            # KDA forward (doesn't use ve, cos_sin, window_size the same way)
+            # KDA handles its own normalization and gating
+            attn_out, _, _ = self.attn(x, attention_mask=None, use_cache=False)
+            x = x + attn_out
+        else:
+            # Standard attention forward
+            x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
+        
         x = x + self.mlp(norm(x))
         return x
 
@@ -155,14 +188,25 @@ class GPT(nn.Module):
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
         self.window_sizes = self._compute_window_sizes(config)
+        # Compute per-layer types (KDA vs Attention) based on layer_pattern
+        self.layer_types = self._compute_layer_types(config)
         # Pad vocab for efficiency (DDP, tensor cores). This is just an optimization - outputs are cropped in forward().
         # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
         padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab_size != config.vocab_size:
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} for efficiency")
+        
+        # Print hybrid architecture info
+        num_kda = sum(1 for t in self.layer_types if t == 'K')
+        num_attn = sum(1 for t in self.layer_types if t == 'A')
+        print0(f"Hybrid Architecture: {num_kda} KDA layers + {num_attn} Attention layers (pattern: {config.layer_pattern})")
+        
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+            "h": nn.ModuleList([
+                Block(config, layer_idx, use_kda=(self.layer_types[layer_idx] == 'K'))
+                for layer_idx in range(config.n_layer)
+            ]),
         })
         self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
@@ -256,6 +300,25 @@ class GPT(nn.Module):
         cos, sin = cos.bfloat16(), sin.bfloat16() # keep them in bfloat16
         cos, sin = cos[None, :, None, :], sin[None, :, None, :] # add batch and head dims for later broadcasting
         return cos, sin
+
+    def _compute_layer_types(self, config):
+        """
+        Compute per-layer types (KDA vs Attention) based on layer_pattern.
+        
+        Pattern string is tiled across layers.
+        Characters: K=KDA, A=Attention
+        Examples: "KKKA"=3:1 ratio, "KA"=alternating, "A"=all attention
+        
+        Returns list of characters ('K' or 'A') for each layer.
+        """
+        pattern = config.layer_pattern.upper()
+        assert all(c in "KA" for c in pattern), f"Invalid layer_pattern: {pattern}. Use only K and A."
+        # Tile pattern across layers
+        layer_types = []
+        for layer_idx in range(config.n_layer):
+            char = pattern[layer_idx % len(pattern)]
+            layer_types.append(char)
+        return layer_types
 
     def _compute_window_sizes(self, config):
         """
