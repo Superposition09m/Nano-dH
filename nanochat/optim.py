@@ -5,12 +5,6 @@ Two versions are provided (MuonAdamW, DistMuonAdamW), for single GPU and distrib
 
 Addapted from: https://github.com/KellerJordan/modded-nanogpt
 Further contributions from @karpathy and @chrisjmccormick.
-
----
-This file is adapted from nanochat (https://github.com/karpathy/nanochat)
-Copyright (c) 2025 Andrej Karpathy
-License: MIT (see ATTRIBUTION/NANOCHAT.LICENSE)
----
 """
 
 import torch

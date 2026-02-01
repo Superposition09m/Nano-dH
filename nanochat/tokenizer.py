@@ -4,12 +4,6 @@ BPE Tokenizer in the style of GPT-4.
 Two implementations are available:
 1) HuggingFace Tokenizer that can do both training and inference but is really confusing
 2) Our own RustBPE Tokenizer for training and tiktoken for efficient inference
-
----
-This file is adapted from nanochat (https://github.com/karpathy/nanochat)
-Copyright (c) 2025 Andrej Karpathy
-License: MIT (see ATTRIBUTION/NANOCHAT.LICENSE)
----
 """
 
 import os

@@ -8,12 +8,6 @@ BOS-aligned bestfit:
    - 100% utilization (no padding), ~35% tokens cropped at T=2048
 
 Compared to the original tokenizing_distributed_data_loader:
-
----
-This file is adapted from nanochat (https://github.com/karpathy/nanochat)
-Copyright (c) 2025 Andrej Karpathy
-License: MIT (see ATTRIBUTION/NANOCHAT.LICENSE)
----
 BOS-aligned loses ~35% of tokens to cropping, but ensures that
 there are fewer "confusing" tokens in the train/val batches as every token can
 now attend back to the BOS token and sees the full context of the document.
