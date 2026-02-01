@@ -14,7 +14,8 @@ Layer 3:  Attention  ←── 25% for long-range
 [repeat...]
 ```
 
-
+[TODO]
+Support MoE, MLA
 
 ## File structure
 
